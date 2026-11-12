@@ -396,10 +396,14 @@ class Home(QWidget):
         self.quiet = False
         self.meta.setText(f"{len(''.join((r['title'] + r['content']).split()))} 字")
         self.item = self.find(self.cur)
+        self.quiet = True
+        self.lst.setCurrentItem(self.item)
+        self.quiet = False
         self.stack.setCurrentIndex(0)
         self.title.setFocus()
 
     def new(self):
+        self.search.clear()
         if self.draft and not self.title.text().strip() and not self.text.toPlainText().strip():
             self.title.setFocus()
             return
@@ -429,7 +433,10 @@ class Home(QWidget):
         if box.clickedButton() is not ok:
             return
 
-        self.tm.stop()
+        if nid == self.cur:
+            self.tm.stop()
+        else:
+            self.flush()
         idx = self.lst.currentRow()
         if nid == self.cur:
             self.cur = 0
@@ -471,10 +478,7 @@ class Home(QWidget):
         if self.item is None:
             self.reload()
             return
-        n = dict(self.item.data(Qt.UserRole))
-        n["title"] = t
-        n["content"] = c
-        self.item.setData(Qt.UserRole, n)
+        self.item.setData(Qt.UserRole, dict(self.db.get(self.cur)))
         self.lst.viewport().update()
 
     def flush(self):
