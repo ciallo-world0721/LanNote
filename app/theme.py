@@ -1,5 +1,7 @@
+import getpass
+
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 
 COLORS = {
     "yellow": {"label": "鹅黄", "swatch": "#EFC63F"},
@@ -10,6 +12,8 @@ COLORS = {
 }
 
 DEFAULT_COLOR = "yellow"
+
+PEERS = ["#3F7BD6", "#D08A2E", "#4F9A6A", "#B85C7E", "#7A6BD6", "#4C9AA8"]
 
 
 def _icon_pixmap(size):
@@ -38,3 +42,28 @@ def icon():
     for s in (16, 24, 32, 48, 64, 128, 256):
         ic.addPixmap(_icon_pixmap(s))
     return ic
+
+
+def initial(name):
+    return name[:1].upper()
+
+
+def face(p, box, color, text, pt=7.5):
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(color))
+    p.drawEllipse(box)
+    f = QFont()
+    f.setPointSizeF(pt)
+    f.setBold(True)
+    p.setFont(f)
+    p.setPen(QColor("#FFFFFF"))
+    p.drawText(box, Qt.AlignCenter, text)
+
+
+def me_name():
+    return getpass.getuser()[:5]
+
+
+def me_color():
+    n = getpass.getuser()
+    return PEERS[sum(map(ord, n)) % len(PEERS)]

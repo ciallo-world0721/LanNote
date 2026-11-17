@@ -1,12 +1,13 @@
 from datetime import datetime
 
-from PySide6.QtCore import QRect, QSize, Qt, QTimer
+from PySide6.QtCore import QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
     QKeySequence,
     QPainter,
     QPalette,
+    QPen,
     QShortcut,
     QTextBlockFormat,
     QTextCursor,
@@ -14,7 +15,9 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -25,13 +28,14 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStyle,
     QStyledItemDelegate,
-    QTextEdit,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from theme import COLORS, DEFAULT_COLOR, icon
+from bridge import Bridge, Editor, PeerLayer
+from share import Share
+from theme import COLORS, DEFAULT_COLOR, face, icon, initial, me_color, me_name
 
 ROW_H = 88
 
@@ -66,8 +70,27 @@ def name_of(n):
 
 
 class Row(QStyledItemDelegate):
+    def __init__(self, lst, home):
+        super().__init__(lst)
+        self.home = home
+
     def sizeHint(self, opt, idx):
         return QSize(opt.rect.width(), ROW_H)
+
+    def badges(self, p, r, bs):
+        n = min(len(bs), 3)
+        x = r.right() - 6 - n * 19
+        for i in range(n):
+            col, nm = bs[i]
+            face(p, QRect(x + i * 19, r.top() + 13, 16, 16), col, initial(nm))
+        extra = len(bs) - 3
+        if extra > 0:
+            f = QFont(p.font())
+            f.setPointSizeF(7.5)
+            p.setFont(f)
+            p.setPen(QColor("#8F897A"))
+            p.drawText(QRect(x - 26, r.top() + 13, 24, 16),
+                       Qt.AlignRight | Qt.AlignVCenter, "+%d" % extra)
 
     def paint(self, p, opt, idx):
         n = idx.data(Qt.UserRole)
@@ -86,7 +109,6 @@ class Row(QStyledItemDelegate):
             p.setBrush(QColor("#F0ECE2"))
             p.drawRoundedRect(r, 9, 9)
 
-        # 默认色不画色条，免得像列表符号
         c = COLORS[n["color"]]
         if sel or n["color"] != DEFAULT_COLOR:
             p.setPen(Qt.NoPen)
@@ -94,7 +116,8 @@ class Row(QStyledItemDelegate):
             p.drawRoundedRect(QRect(r.left() + 2, r.top() + 18, 3, ROW_H - 48), 1, 1)
 
         x = r.left() + 14
-        w = r.width() - 26
+        bs = self.home.badges.get(n["uid"], [])
+        w = r.width() - 26 - min(len(bs), 3) * 19 - (26 if len(bs) > 3 else 0)
         f = QFont(opt.font)
 
         f.setPointSizeF(10.5)
@@ -112,9 +135,9 @@ class Row(QStyledItemDelegate):
         p.setFont(f)
         p.setPen(QColor("#8F897A"))
         p.drawText(
-            QRect(x, r.top() + 33, w, 19),
+            QRect(x, r.top() + 33, r.width() - 26, 19),
             Qt.AlignLeft | Qt.AlignVCenter,
-            p.fontMetrics().elidedText(brief(n["content"]), Qt.ElideRight, w),
+            p.fontMetrics().elidedText(brief(n["content"]), Qt.ElideRight, r.width() - 26),
         )
 
         d = fmt(n["updated"])
@@ -127,7 +150,46 @@ class Row(QStyledItemDelegate):
         p.setPen(QColor("#97895F") if sel else QColor("#A6A08F"))
         p.drawText(box, Qt.AlignCenter, d)
 
+        if bs:
+            self.badges(p, r, bs)
         p.restore()
+
+
+class Me(QWidget):
+    clicked = Signal()
+
+    def __init__(self, name, color):
+        super().__init__()
+        self.name = name
+        self.color = color
+        self.live = False
+        self.setFixedHeight(56)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("点击改名")
+        self.setFocusPolicy(Qt.NoFocus)
+
+    def sizeHint(self):
+        w = max(40, self.fontMetrics().horizontalAdvance(self.name) + 10)
+        return QSize(w, 56)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        x = (self.width() - 28) // 2
+        face(p, QRect(x, 1, 28, 28), self.color, initial(self.name), 9)
+        if self.live:
+            p.setPen(QPen(QColor("#FFFFFF"), 2))
+            p.setBrush(QColor("#4CC46A"))
+            p.drawEllipse(QRect(x + 18, 19, 10, 10))
+        f = QFont(self.font())
+        f.setPointSizeF(8.5)
+        p.setFont(f)
+        p.setPen(QColor("#6F6A5C"))
+        p.drawText(QRect(0, 31, self.width(), 18), Qt.AlignHCenter | Qt.AlignTop, self.name)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.clicked.emit()
 
 
 class Home(QWidget):
@@ -139,6 +201,13 @@ class Home(QWidget):
         self.item = None
         self.quiet = False
         self.draft = False
+        self.br = None
+        self.layer = None
+        self.badges = {}
+        self.name = store.setting("name", me_name())
+        self.color = store.setting("color", me_color())
+        self.db.set_setting("name", self.name)
+        self.db.set_setting("color", self.color)
 
         self.setObjectName("main")
         self.setWindowTitle("LanNote")
@@ -153,6 +222,7 @@ class Home(QWidget):
 
         self.build()
         self.skin()
+        self.share = Share(self)
         self.reload()
         if self.lst.count():
             self.lst.setCurrentRow(0)
@@ -175,9 +245,11 @@ class Home(QWidget):
         sl.setSpacing(9)
 
         bar = QHBoxLayout()
-        bar.setContentsMargins(8, 0, 2, 0)
-        t = QLabel("全部")
-        t.setObjectName("all")
+        bar.setContentsMargins(2, 0, 2, 0)
+        self.me = Me(self.name, self.color)
+        self.me.clicked.connect(self.rename)
+        bar.addWidget(self.me)
+        bar.addStretch(1)
         self.btnNew = QToolButton()
         self.btnNew.setObjectName("add")
         self.btnNew.setText("＋")
@@ -185,8 +257,6 @@ class Home(QWidget):
         self.btnNew.setCursor(Qt.PointingHandCursor)
         self.btnNew.setFocusPolicy(Qt.NoFocus)
         self.btnNew.clicked.connect(self.new)
-        bar.addWidget(t)
-        bar.addStretch(1)
         bar.addWidget(self.btnNew)
         sl.addLayout(bar)
 
@@ -200,7 +270,7 @@ class Home(QWidget):
         self.lst = QListWidget()
         self.lst.setObjectName("notes")
         self.lst.setFrameShape(QFrame.NoFrame)
-        self.lst.setItemDelegate(Row(self.lst))
+        self.lst.setItemDelegate(Row(self.lst, self))
         self.lst.setSelectionMode(QAbstractItemView.SingleSelection)
         self.lst.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.lst.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -228,8 +298,16 @@ class Home(QWidget):
         tl.setSpacing(2)
         self.btnUndo = self.tb("↶", "撤销")
         self.btnRedo = self.tb("↷", "重做")
+        self.btnUndo.clicked.connect(self.undo)
+        self.btnRedo.clicked.connect(self.redo)
         tl.addWidget(self.btnUndo)
         tl.addWidget(self.btnRedo)
+        tl.addStretch(1)
+        self.btnShare = self.tb("共享", "共享这条笔记")
+        self.btnShare.setObjectName("share")
+        self.btnShare.setFixedWidth(68)
+        self.btnShare.clicked.connect(self.ask_share)
+        tl.addWidget(self.btnShare)
         pl.addWidget(top)
 
         self.stack = QStackedWidget()
@@ -252,7 +330,7 @@ class Home(QWidget):
         el.addWidget(self.meta)
         el.addSpacing(14)
 
-        self.text = QTextEdit()
+        self.text = Editor()
         self.text.setObjectName("body")
         self.text.setAcceptRichText(False)
         self.text.setFrameShape(QFrame.NoFrame)
@@ -265,6 +343,7 @@ class Home(QWidget):
         self.stack.addWidget(ed)
 
         blank = QWidget()
+        blank.setFocusPolicy(Qt.NoFocus)
         bl = QVBoxLayout(blank)
         bl.addStretch(1)
         hint = QLabel("左边选一条，或者按 Ctrl+N 新写一条")
@@ -273,6 +352,9 @@ class Home(QWidget):
         bl.addWidget(hint)
         bl.addStretch(1)
         self.stack.addWidget(blank)
+        fade = QGraphicsOpacityEffect(blank)
+        fade.setOpacity(0.55)
+        blank.setGraphicsEffect(fade)
 
         pl.addWidget(self.stack, 1)
 
@@ -282,11 +364,12 @@ class Home(QWidget):
         self.sp.setStretchFactor(1, 1)
         self.sp.setSizes([300, 780])
 
-        self.btnUndo.clicked.connect(self.text.undo)
-        self.btnRedo.clicked.connect(self.text.redo)
         QShortcut(QKeySequence("Ctrl+N"), self).activated.connect(self.new)
         QShortcut(QKeySequence("Ctrl+F"), self).activated.connect(self.focus_search)
         QShortcut(QKeySequence("Ctrl+S"), self).activated.connect(self.flush)
+        QShortcut(QKeySequence.Undo, self).activated.connect(self.undo)
+        QShortcut(QKeySequence.Redo, self).activated.connect(self.redo)
+        QShortcut(QKeySequence("Ctrl+Shift+Z"), self).activated.connect(self.redo)
 
     def tb(self, txt, tip):
         b = QToolButton()
@@ -306,7 +389,6 @@ class Home(QWidget):
             QFrame#side { background: #F7F5EF; }
             QSplitter::handle { background: #ECE7DA; }
             QSplitter::handle:horizontal { width: 1px; }
-            QLabel#all { color: #2E2C26; font-size: 12.5pt; font-weight: 600; }
             QToolButton#add {
                 border: none; background: transparent; color: #6E6959;
                 font-size: 15pt; padding: 0 8px; border-radius: 6px;
@@ -326,6 +408,15 @@ class Home(QWidget):
                 font-size: 13pt; padding: 0 7px; border-radius: 6px;
             }
             QToolButton#tb:hover { background: #F2EFE6; color: #4A463C; }
+            QToolButton#tb:disabled { color: #D6D1C4; }
+            QToolButton#share {
+                border: 1px solid #E6DFCF; background: #FFFFFF; color: #57523F;
+                font-size: 9.5pt; padding: 0; border-radius: 7px;
+            }
+            QToolButton#share:hover { background: #F5F1E6; }
+            QToolButton#share[on="true"] {
+                background: #FDF1C9; border-color: #E7CB77; color: #6B5410;
+            }
             QStackedWidget#stack { background: #FFFFFF; }
             QLineEdit#title {
                 border: none; background: transparent; color: #23211C;
@@ -373,7 +464,13 @@ class Home(QWidget):
 
         self.cnt.setText(f"{len(rows)} 条" if rows else "")
         if not self.cur and not self.draft:
-            self.stack.setCurrentIndex(1)
+            self.page(1)
+        self.refresh_badges()
+
+    def page(self, i):
+        self.stack.setCurrentIndex(i)
+        self.btnUndo.setEnabled(i == 0)
+        self.btnRedo.setEnabled(i == 0)
 
     def find(self, nid):
         for i in range(self.lst.count()):
@@ -382,10 +479,14 @@ class Home(QWidget):
                 return it
         return None
 
+    def note_name(self):
+        return name_of(self.db.get(self.cur)) if self.cur else "未打开笔记"
+
     def pick(self, nid):
         if nid == self.cur:
             return
         self.flush()
+        self.detach()
         r = self.db.get(nid)
         self.cur = r["id"]
         self.draft = False
@@ -399,7 +500,9 @@ class Home(QWidget):
         self.quiet = True
         self.lst.setCurrentItem(self.item)
         self.quiet = False
-        self.stack.setCurrentIndex(0)
+        self.page(0)
+        self.attach()
+        self.share.say_presence()
         self.title.setFocus()
 
     def new(self):
@@ -408,6 +511,7 @@ class Home(QWidget):
             self.title.setFocus()
             return
         self.flush()
+        self.detach()
         self.cur = 0
         self.draft = True
         self.item = None
@@ -417,7 +521,8 @@ class Home(QWidget):
         self.text.clear()
         self.quiet = False
         self.meta.setText("0 字")
-        self.stack.setCurrentIndex(0)
+        self.page(0)
+        self.share.say_presence()
         self.title.setFocus()
 
     def remove(self, nid):
@@ -433,12 +538,15 @@ class Home(QWidget):
         if box.clickedButton() is not ok:
             return
 
+        if self.share.live and self.share.note["id"] == nid:
+            self.share.stop()
         if nid == self.cur:
             self.tm.stop()
         else:
             self.flush()
         idx = self.lst.currentRow()
         if nid == self.cur:
+            self.detach()
             self.cur = 0
             self.quiet = True
             self.title.clear()
@@ -451,17 +559,22 @@ class Home(QWidget):
             it = self.lst.currentItem()
             self.pick(it.data(Qt.UserRole)["id"])
         else:
-            self.stack.setCurrentIndex(1)
+            self.page(1)
 
     def save(self):
         t = self.title.text().strip()
         c = self.text.toPlainText()
+        if self.share.live and self.share.note["id"] == self.cur:
+            c = self.share.sdoc.t()
         if not self.cur:
             if not t and not c.strip():
                 return
             self.cur = self.db.create()
             self.draft = False
         elif not t and not c.strip():
+            if self.share.live and self.share.note["id"] == self.cur:
+                self.db.save(self.cur, t, c)
+                return
             self.tm.stop()
             self.db.delete(self.cur)
             self.cur = 0
@@ -472,9 +585,15 @@ class Home(QWidget):
                 self.item = None
             self.lst.setCurrentItem(None)
             self.quiet = False
+            self.detach()
+            self.page(1)
+            self.share.say_presence()
             return
 
         self.db.save(self.cur, t, c)
+        if self.share.live and self.share.note["id"] == self.cur:
+            self.share.note["title"] = t
+            self.share.note["color"] = self.db.get(self.cur)["color"]
         if self.item is None:
             self.reload()
             return
@@ -494,12 +613,96 @@ class Home(QWidget):
         self.meta.setText(f"{len(''.join(s.split()))} 字")
 
     def linespace(self):
-        # 行距松一点，不然一整段挤成一坨；QTextBlock 没有 setter，只能走游标
+        # QTextBlock 没有 setter，只能走游标
         c = QTextCursor(self.text.document())
         c.select(QTextCursor.Document)
         f = QTextBlockFormat()
         f.setLineHeight(168.0, 1)  # 1 = ProportionalHeight，PySide 这里不吃枚举
         c.mergeBlockFormat(f)
+
+    def attach(self):
+        self.detach()
+        if not self.share.live or not self.cur:
+            return
+        if self.db.get(self.cur)["uid"] != self.share.note["uid"]:
+            return
+        self.text.setUndoRedoEnabled(False)
+        self.br = Bridge(self.text, self.share.sdoc)
+        self.br.tell = self.share.cur_moved
+        self.layer = PeerLayer(self.text, self.share.sdoc)
+        self.br.touched.connect(self.layer.refresh)
+        self.share.layer = self.layer
+        self.share.replay()
+        self.br.render()
+        self.share.cur_moved()
+
+    def detach(self):
+        if self.br:
+            self.br.release()
+            self.br = None
+        if self.layer:
+            self.text.viewport().removeEventFilter(self.layer)
+            self.layer.hide()
+            self.layer.setParent(None)
+            self.layer.deleteLater()
+            self.layer = None
+        self.share.layer = None
+        self.text.setExtraSelections([])
+
+    def undo(self):
+        if self.br:
+            if self.br.doc.undo():
+                self.br.render()
+            self.touched()
+            return
+        self.text.undo()
+
+    def redo(self):
+        if self.br:
+            if self.br.doc.redo():
+                self.br.render()
+            self.touched()
+            return
+        self.text.redo()
+
+    def ask_share(self):
+        if self.share.live:
+            self.share.panel.show_panel()
+            return
+        self.flush()
+        if not self.cur:
+            QMessageBox.information(self, "LanNote", "先打开一条笔记")
+            return
+        self.share.panel.show_panel()
+
+    def rename(self):
+        name, ok = QInputDialog.getText(self, "改名", "你的名字（最多 5 字）",
+                                        QLineEdit.Normal, self.me.name)
+        name = name.strip()[:5]
+        if not ok or not name:
+            return
+        self.rename_to(name)
+
+    def rename_to(self, name):
+        self.me.name = name
+        self.me.updateGeometry()
+        self.me.update()
+        self.db.set_setting("name", name)
+        self.share.rename()
+
+    def share_ui(self):
+        live = self.share.live
+        self.btnShare.setText("共享中" if live else "共享")
+        self.btnShare.setProperty("on", "true" if live else "false")
+        self.btnShare.style().unpolish(self.btnShare)
+        self.btnShare.style().polish(self.btnShare)
+        self.me.live = live
+        self.me.update()
+        self.refresh_badges()
+
+    def refresh_badges(self):
+        self.badges = self.share.here() if self.share.live else {}
+        self.lst.viewport().update()
 
     def switched(self, cur, prev):
         if self.quiet or cur is None:
@@ -523,6 +726,8 @@ class Home(QWidget):
 
     def recolor(self, nid, key):
         self.db.set_color(nid, key)
+        if self.share.live and self.share.note["id"] == nid:
+            self.share.note["color"] = key
         self.reload()
         it = self.find(nid)
         if it:
@@ -541,7 +746,11 @@ class Home(QWidget):
     def closeEvent(self, e):
         self.flush()
         if self.keep:
+            self.share.panel.hide()
+            if self.share.live:
+                self.share.flush_session()
             e.ignore()
             self.hide()
             return
+        self.share.stop()
         super().closeEvent(e)

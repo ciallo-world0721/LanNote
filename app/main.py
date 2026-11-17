@@ -1,3 +1,4 @@
+import argparse
 import sys
 import traceback
 from pathlib import Path
@@ -8,7 +9,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
 from mainwin import Home
 from store import Store
-from theme import icon
+from theme import PEERS, icon
 
 APP_NAME = "LanNote"
 
@@ -59,6 +60,12 @@ class Ctl(QObject):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--name")
+    ap.add_argument("--db")
+    ap.add_argument("--share", action="store_true")
+    a = ap.parse_args()
+
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
@@ -66,16 +73,29 @@ def main():
     app.setFont(QFont("Microsoft YaHei UI", 9))
     sys.excepthook = logerr
 
-    lock = QLockFile(str(Path(QStandardPaths.writableLocation(QStandardPaths.TempLocation)) / "lannote.lock"))
-    if not lock.tryLock(100):
-        QMessageBox.information(None, APP_NAME, "LanNote 已经在跑了，看托盘。")
-        return 0
+    lock = None
+    if not a.db:
+        lock = QLockFile(str(Path(QStandardPaths.writableLocation(QStandardPaths.TempLocation))
+                             / "lannote-live.lock"))
+        if not lock.tryLock(100):
+            QMessageBox.information(None, APP_NAME, "LanNote 已经在跑了，看托盘。")
+            return 0
 
-    store = Store()
+    store = Store(a.db)
+    if a.name and a.name.strip():
+        name = a.name.strip()[:5]
+        store.set_setting("name", name)
+        if not store.setting("color"):
+            store.set_setting("color", PEERS[sum(map(ord, name)) % len(PEERS)])
+
     ctl = Ctl(app, store)  # 得留引用，不然托盘被回收
+    if a.share and ctl.home.cur:
+        ctl.home.share.panel.show_panel()
+        ctl.home.share.panel.confirm()
     rc = app.exec()
     store.close()
-    lock.unlock()
+    if lock:
+        lock.unlock()
     return rc
 
 
