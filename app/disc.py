@@ -6,11 +6,13 @@ from wire import (ANN_MS, ANNOUNCE, APP, BYE, DISC_PORT, PEER_TTL_MS, RID,
 
 
 def lan_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.connect(("8.8.8.8", 80))
-    ip = s.getsockname()[0]
-    s.close()
-    return ip
+    # 默认路由可能是代理的 TUN 网卡，只认私网地址
+    for ip in socket.gethostbyname_ex(socket.gethostname())[2]:
+        p = ip.split(".")
+        if p[0] == "10" or (p[0] == "192" and p[1] == "168") or \
+           (p[0] == "172" and 16 <= int(p[1]) <= 31):
+            return ip
+    return "127.0.0.1"
 
 
 class Disc:
@@ -49,7 +51,7 @@ class Disc:
 
     def payload(self, t):
         return pack(t, v=VER, app=APP, rid=self.rid, iid=self.iid,
-                    name=self.name, ws=self.ws_port, ts=now_ms()).encode()
+                    name=self.name, ws=self.ws_port, ip=lan_ip(), ts=now_ms()).encode()
 
     def _cast(self, data):
         self.tx.sendto(data, ("<broadcast>", self.port))
@@ -88,9 +90,11 @@ class Disc:
                 if p:
                     self.log("peer-bye %s %s" % (p["name"], iid))
                 continue
+            # 广播从哪块网卡出去不一定，别拿 UDP 源地址当对端地址
+            host = d.get("ip") or addr[0]
             p = self.peers.get(iid)
             if p is None:
-                p = {"iid": iid, "name": d["name"], "addr": addr[0],
+                p = {"iid": iid, "name": d["name"], "addr": host,
                      "ws": d["ws"], "seen": now_ms()}
                 self.peers[iid] = p
                 self.log("peer-seen %s %s %s:%s" %
@@ -98,9 +102,9 @@ class Disc:
                 await self.on_peer(p)
             else:
                 p["seen"] = now_ms()
-                if p["ws"] != d["ws"] or p["addr"] != addr[0]:
+                if p["ws"] != d["ws"] or p["addr"] != host:
                     p["ws"] = d["ws"]
-                    p["addr"] = addr[0]
+                    p["addr"] = host
                     self.log("peer-moved %s %s -> %s:%s" %
                              (p["name"], iid, p["addr"], p["ws"]))
                     await self.on_peer(p)

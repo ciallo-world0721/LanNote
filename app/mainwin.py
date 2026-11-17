@@ -508,6 +508,7 @@ class Home(QWidget):
     def new(self):
         self.search.clear()
         if self.draft and not self.title.text().strip() and not self.text.toPlainText().strip():
+            self.page(0)
             self.title.setFocus()
             return
         self.flush()
